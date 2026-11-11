@@ -1,0 +1,94 @@
+name: e2e
+# 비공개 시험 저장소(ncentric-install-test)의 e2e 와 같은 시험. 시험 도구·설치 파일은 암호화 묶음(bundle.tar.enc)으로만 올리고
+# 결과도 암호화(result.enc)한다. 각 단계 출력은 out/ 안 파일로 — 공개 기록에는 종료 코드만 남는다.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: release tag holding bundle.tar.enc
+        required: true
+      cases:
+        description: JSON list of edition-variant
+        default: '["nc-main","in-main","nc-upgrade","nc-stduser","in-stduser","nc-proxy","in-proxy"]'
+      oses:
+        description: JSON list of runner images
+        default: '["windows-2022","windows-2025"]'
+      winsec:
+        description: Windows security on
+        default: 'true'
+      testsign:
+        description: test-sign installers first
+        default: 'false'
+permissions:
+  contents: read
+jobs:
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.oses) }}
+        case: ${{ fromJSON(inputs.cases) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 170
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: harness python packages
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check -q cryptography openpyxl reportlab pillow pymupdf *> $null; "rc=$LASTEXITCODE"
+      - name: screen 1920x1080
+        shell: powershell
+        continue-on-error: true
+        run: try { Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop; 'ok' } catch { 'skip' }
+      - name: unpack
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_KEY: ${{ secrets.BUNDLE_KEY }}
+        run: |
+          gh release download "${{ inputs.tag }}" -R "${{ github.repository }}" -p bundle.tar.enc
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BUNDLE_KEY -in bundle.tar.enc | tar -x
+          rm -f bundle.tar.enc; mkdir -p out; test -d ci && test -d dl && echo unpacked
+      - name: test-sign installers
+        if: ${{ inputs.testsign == 'true' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"; $global:LASTEXITCODE = 0
+          try { ./ci/test_sign.ps1 *> out/testsign.log; $rc = $LASTEXITCODE } catch { $_ | Out-File -Append out/testsign.log; $rc = 1 }
+          "rc=$rc"; exit $rc
+      - name: windows security on
+        if: ${{ inputs.winsec == 'true' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"; $global:LASTEXITCODE = 0
+          try { ./ci/defender_on.ps1 *> out/defender_on.log; $rc = $LASTEXITCODE } catch { $_ | Out-File -Append out/defender_on.log; $rc = 1 }
+          "rc=$rc"; exit $rc
+      - name: e2e
+        timeout-minutes: 150
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"; $global:LASTEXITCODE = 0
+          try { $c = '${{ matrix.case }}'.Split('-'); ./ci/e2e/run.ps1 -Edition $c[0] -Variant $c[1] *> out/e2e_console.log; $rc = $LASTEXITCODE } catch { $_ | Out-File -Append out/e2e_console.log; $rc = 1 }
+          "rc=$rc"; exit $rc
+      - name: windows security verdict
+        if: ${{ always() && inputs.winsec == 'true' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"; $global:LASTEXITCODE = 0
+          try { ./ci/defender_verdict.ps1 *> out/defender_verdict.log; $rc = $LASTEXITCODE } catch { $_ | Out-File -Append out/defender_verdict.log; $rc = 1 }
+          "rc=$rc"; exit $rc
+      - name: seal results
+        if: always()
+        shell: bash
+        env:
+          BUNDLE_KEY: ${{ secrets.BUNDLE_KEY }}
+        run: mkdir -p out && tar -c out | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:BUNDLE_KEY -out result.enc
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-${{ matrix.os }}-${{ matrix.case }}
+          path: result.enc

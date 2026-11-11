@@ -1,0 +1,96 @@
+name: install-test
+# 비공개 시험 저장소의 install-test 와 같은 시험(설치 시나리오 + Defender 실검사·설치). 입출력 암호화는 e2e.yml 머리 참고.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: release tag holding bundle.tar.enc
+        required: true
+      scenarios:
+        description: JSON list of scenarios
+        default: '["A","B","C","D","E","F","G","H","I","J","A-in"]'
+      oses:
+        description: JSON list of runner images
+        default: '["windows-2022","windows-2025"]'
+      defender:
+        description: run defender job
+        default: 'true'
+      install:
+        description: run install scenarios
+        default: 'true'
+permissions:
+  contents: read
+jobs:
+  install:
+    if: ${{ inputs.install == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.oses) }}
+        scenario: ${{ fromJSON(inputs.scenarios) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - name: unpack
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_KEY: ${{ secrets.BUNDLE_KEY }}
+        run: |
+          gh release download "${{ inputs.tag }}" -R "${{ github.repository }}" -p bundle.tar.enc
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BUNDLE_KEY -in bundle.tar.enc | tar -x
+          rm -f bundle.tar.enc; mkdir -p out; test -d ci && test -d dl && echo unpacked
+      - name: install and verify
+        timeout-minutes: 90
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"; $global:LASTEXITCODE = 0
+          try { ./ci/install_test.ps1 -Scenario ${{ matrix.scenario }} *> out/transcript.log; $rc = $LASTEXITCODE } catch { $_ | Out-File -Append out/transcript.log; $rc = 1 }
+          "rc=$rc"; exit $rc
+      - name: seal results
+        if: always()
+        shell: bash
+        env:
+          BUNDLE_KEY: ${{ secrets.BUNDLE_KEY }}
+        run: mkdir -p out && tar -c out | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:BUNDLE_KEY -out result.enc
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: log-${{ matrix.os }}-${{ matrix.scenario }}
+          path: result.enc
+  defender:
+    if: ${{ inputs.defender == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.oses) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - name: unpack
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_KEY: ${{ secrets.BUNDLE_KEY }}
+        run: |
+          gh release download "${{ inputs.tag }}" -R "${{ github.repository }}" -p bundle.tar.enc
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BUNDLE_KEY -in bundle.tar.enc | tar -x
+          rm -f bundle.tar.enc; mkdir -p out; test -d ci && test -d dl && echo unpacked
+      - name: defender real scan + install
+        timeout-minutes: 90
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"; $global:LASTEXITCODE = 0
+          try { ./ci/defender_test.ps1 *> out/transcript.log; $rc = $LASTEXITCODE } catch { $_ | Out-File -Append out/transcript.log; $rc = 1 }
+          "rc=$rc"; exit $rc
+      - name: seal results
+        if: always()
+        shell: bash
+        env:
+          BUNDLE_KEY: ${{ secrets.BUNDLE_KEY }}
+        run: mkdir -p out && tar -c out | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:BUNDLE_KEY -out result.enc
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: defender-${{ matrix.os }}
+          path: result.enc
