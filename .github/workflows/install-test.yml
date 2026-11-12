@@ -109,12 +109,23 @@ jobs:
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BUNDLE_KEY -in bundle.tar.enc | tar -x
           rm -f bundle.tar.enc; mkdir -p out; test -d ci && test -d dl && echo unpacked
       - name: defender real scan + install
-        timeout-minutes: 90
+        timeout-minutes: 40   # 평소 17~20분 — 11-12 13:25 windows-2022 에서 45분 넘게 멈춘 채 기록 없이 취소됨
         shell: powershell
         run: |
           $ErrorActionPreference = "Continue"; $global:LASTEXITCODE = 0
           try { ./ci/defender_test.ps1 *> out/transcript.log; $rc = $LASTEXITCODE } catch { $_ | Out-File -Append out/transcript.log; $rc = 1 }
           "rc=$rc"; exit $rc
+      - name: host info
+        if: always()
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+          Get-CimInstance Win32_Processor | Format-List Name, NumberOfCores, NumberOfLogicalProcessors *> out/cpu.txt
+          Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000, 1001, 1002 } -MaxEvents 8 -ErrorAction SilentlyContinue | Format-List TimeCreated, Id, Message *> out/crash_events.txt
+          Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python|powershell|MpCmdRun|CENTRIC|setup|금융|건물|세무' } | Sort-Object CreationDate | Format-Table ProcessId, ParentProcessId, Name, CreationDate, @{ n = 'cmd'; e = { ([string]$_.CommandLine).Substring(0, [Math]::Min(160, ([string]$_.CommandLine).Length)) } } -AutoSize | Out-String -Width 260 *> out/procs_at_end.txt
+          Copy-Item out/transcript.log out/transcript_copy.log -ErrorAction SilentlyContinue
+          "ok"
       - name: seal results
         if: always()
         shell: bash
