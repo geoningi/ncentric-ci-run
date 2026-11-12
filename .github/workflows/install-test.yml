@@ -18,6 +18,9 @@ on:
       install:
         description: run install scenarios
         default: 'true'
+      diag:
+        description: OCR smoke under CPU-instruction caps (diagnostic)
+        default: 'false'
 permissions:
   contents: read
 jobs:
@@ -47,6 +50,23 @@ jobs:
           $ErrorActionPreference = "Continue"; $global:LASTEXITCODE = 0
           try { ./ci/install_test.ps1 -Scenario ${{ matrix.scenario }} *> out/transcript.log; $rc = $LASTEXITCODE } catch { $_ | Out-File -Append out/transcript.log; $rc = 1 }
           "rc=$rc"; exit $rc
+      - name: ocr diag
+        if: ${{ always() && inputs.diag == 'true' }}
+        timeout-minutes: 25
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+          $py = Join-Path $env:LOCALAPPDATA 'Programs\CENTRIC-Python312\python.exe'
+          $cfgs = @(@('none', $null, $null), @('onednn_avx2', 'ONEDNN_MAX_CPU_ISA', 'AVX2'), @('onednn_avx512core', 'ONEDNN_MAX_CPU_ISA', 'AVX512_CORE'), @('none_again', $null, $null))
+          foreach ($c in $cfgs) { foreach ($i in 1, 2, 3) {
+            Remove-Item Env:ONEDNN_MAX_CPU_ISA -ErrorAction SilentlyContinue
+            if ($c[1]) { Set-Item "Env:$($c[1])" $c[2] }
+            $global:LASTEXITCODE = 0
+            try { & $py -I -u ci/ocr_smoke.py out *> "out/diag_$($c[0])_$i.txt" } catch { }
+            "$($c[0]) $i rc=$LASTEXITCODE" >> out/diag.txt
+          } }
+          Remove-Item Env:ONEDNN_MAX_CPU_ISA -ErrorAction SilentlyContinue
+          "ok"
       - name: host info
         if: always()
         shell: powershell
