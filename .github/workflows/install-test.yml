@@ -8,7 +8,7 @@ on:
         required: true
       scenarios:
         description: JSON list of scenarios
-        default: '["A","B","C","D","E","F","G","H","I","J","A-in"]'
+        default: '["A","B","C","D","E","F","G","H","I","J","K","A-in"]'
       oses:
         description: JSON list of runner images
         default: '["windows-2022","windows-2025"]'
