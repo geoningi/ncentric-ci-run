@@ -3,7 +3,7 @@
 # 사용: bash pack.sh <태그> <nc_setup.exe> <in_setup.exe> <nc_setup_1106.exe>
 # 열쇠는 D:/centric_work/ci_public_key.txt (저장소 밖) — 같은 값이 저장소 비밀값 BUNDLE_KEY 에 있다. 결과 풀기: bash unseal.sh <result.enc> <폴더>
 set -euo pipefail
-tag=$1; W=$(mktemp -d -p E:/centric_tmp pack.XXXX); trap 'rm -rf "$W"' EXIT
+tag=$1; W=$(mktemp -d -p "${PACK_TMP:-E:/centric_tmp}" pack.XXXX); trap 'rm -rf "$W"' EXIT
 export BUNDLE_KEY=$(cat D:/centric_work/ci_public_key.txt)
 git -C D:/centric_work/ci_repo archive HEAD ci | tar -x -C "$W"
 mkdir "$W/dl"; cp "$2" "$W/dl/nc_setup.exe"; cp "$3" "$W/dl/in_setup.exe"; cp "$4" "$W/dl/nc_setup_1106.exe"
