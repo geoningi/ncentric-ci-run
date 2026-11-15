@@ -19,6 +19,9 @@ on:
       testsign:
         description: test-sign installers first
         default: 'false'
+      hb:
+        description: heartbeat to the public log every minute (elapsed, memory, cpu, process names, step id only)
+        default: 'false'
 permissions:
   contents: read
 jobs:
@@ -68,12 +71,35 @@ jobs:
           try { ./ci/defender_on.ps1 *> out/defender_on.log; $rc = $LASTEXITCODE } catch { $_ | Out-File -Append out/defender_on.log; $rc = 1 }
           "rc=$rc"; exit $rc
       - name: e2e
+        if: ${{ inputs.hb != 'true' }}
         timeout-minutes: 150
         shell: powershell
         run: |
           $ErrorActionPreference = "Continue"; $global:LASTEXITCODE = 0
           try { $c = '${{ matrix.case }}'.Split('-'); ./ci/e2e/run.ps1 -Edition $c[0] -Variant $c[1] *> out/e2e_console.log; $rc = $LASTEXITCODE } catch { $_ | Out-File -Append out/e2e_console.log; $rc = 1 }
           "rc=$rc"; exit $rc
+      # 11-15: windows-2022 + Windows 보안 켬에서 작업이 멈춘 채 47분에 «runner lost communication» 으로 죽는다(기록도 사라짐).
+      #   같은 시험을 자식 프로세스로 돌리고, 이 단계는 1분마다 맥박 한 줄만 공개 기록에 찍는다 — 경과·남은 메모리·CPU·상위 프로세스 이름·
+      #   마지막 단계 번호·github 접속 여부. 경로·주소·사용자 이름·시험 출력은 찍지 않는다(시험 출력은 종전대로 out/ 안 파일).
+      - name: e2e (heartbeat)
+        if: ${{ inputs.hb == 'true' }}
+        timeout-minutes: 150
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+          $c = '${{ matrix.case }}'.Split('-')
+          $p = Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', './ci/e2e/run.ps1', '-Edition', $c[0], '-Variant', $c[1] -RedirectStandardOutput out/e2e_console.log -RedirectStandardError out/e2e_console_err.log -PassThru -NoNewWindow; $null = $p.Handle
+          $t0 = Get-Date
+          while (-not $p.HasExited) {
+            Start-Sleep -Seconds 60
+            $os = Get-CimInstance Win32_OperatingSystem
+            $cpu = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average
+            $top = (Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 | ForEach-Object { ($_.Name -replace '[^A-Za-z0-9_.-]', '?') + ':' + [int]$_.CPU }) -join ' '
+            $sid = '-'; try { $m = [regex]::Matches((Get-Content out/steps.log -Tail 40 -ErrorAction Stop | Out-String), '\b[SU]\d{1,3}\b'); if ($m.Count) { $sid = $m[$m.Count - 1].Value } } catch { }
+            $net = 'x'; try { $tc = New-Object Net.Sockets.TcpClient; $ar = $tc.BeginConnect('github.com', 443, $null, $null); if ($ar.AsyncWaitHandle.WaitOne(4000) -and $tc.Connected) { $net = 'ok' }; $tc.Close() } catch { }
+            "hb {0,3}m mem={1}MB cpu={2}% step={3} net={4} procs={5} top={6}" -f [int]((Get-Date) - $t0).TotalMinutes, [int]($os.FreePhysicalMemory / 1024), [int]$cpu, $sid, $net, @(Get-Process).Count, $top
+          }
+          "rc=$($p.ExitCode)"; exit $p.ExitCode
       - name: windows security verdict
         if: ${{ always() && inputs.winsec == 'true' }}
         shell: powershell
