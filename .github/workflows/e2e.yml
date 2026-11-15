@@ -89,15 +89,17 @@ jobs:
           $ErrorActionPreference = "Continue"
           $c = '${{ matrix.case }}'.Split('-')
           $p = Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', './ci/e2e/run.ps1', '-Edition', $c[0], '-Variant', $c[1] -RedirectStandardOutput out/e2e_console.log -RedirectStandardError out/e2e_console_err.log -PassThru -NoNewWindow; $null = $p.Handle
-          $t0 = Get-Date
+          $t0 = Get-Date; $i = 0
           while (-not $p.HasExited) {
-            Start-Sleep -Seconds 60
+            Start-Sleep -Seconds 60; $i++
             $os = Get-CimInstance Win32_OperatingSystem
             $cpu = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average
             $top = (Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 | ForEach-Object { ($_.Name -replace '[^A-Za-z0-9_.-]', '?') + ':' + [int]$_.CPU }) -join ' '
             $sid = '-'; try { $m = [regex]::Matches((Get-Content out/steps.log -Tail 40 -ErrorAction Stop | Out-String), '\b[SU]\d{1,3}\b'); if ($m.Count) { $sid = $m[$m.Count - 1].Value } } catch { }
             $net = 'x'; try { $tc = New-Object Net.Sockets.TcpClient; $ar = $tc.BeginConnect('github.com', 443, $null, $null); if ($ar.AsyncWaitHandle.WaitOne(4000) -and $tc.Connected) { $net = 'ok' }; $tc.Close() } catch { }
-            "hb {0,3}m mem={1}MB cpu={2}% step={3} net={4} procs={5} top={6}" -f [int]((Get-Date) - $t0).TotalMinutes, [int]($os.FreePhysicalMemory / 1024), [int]$cpu, $sid, $net, @(Get-Process).Count, $top
+            $line = "hb {0}m mem={1}MB commit={7}MB disk={8}GB cpu={2}% step={3} net={4} procs={5} top={6}" -f [int]((Get-Date) - $t0).TotalMinutes, [int]($os.FreePhysicalMemory / 1024), [int]$cpu, $sid, $net, @(Get-Process).Count, $top, [int]($os.FreeVirtualMemory / 1024), [int]((Get-PSDrive C).Free / 1GB)
+            # 서버가 끊기면 기록이 통째로 사라진다 — 주석(annotation)은 서버에 바로 남는다. 단계마다 종류별 10개 한도라 처음 10분은 매분(notice), 그 뒤는 3분마다(warning).
+            if ($i -le 10) { "::notice title=hb::$line" } elseif (($i % 3) -eq 0 -and $i -le 40) { "::warning title=hb::$line" } else { $line }
           }
           "rc=$($p.ExitCode)"; exit $p.ExitCode
       - name: windows security verdict
