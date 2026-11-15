@@ -23,7 +23,7 @@ on:
         description: heartbeat to the public log every minute (elapsed, memory, cpu, process names, step id only)
         default: 'false'
 permissions:
-  contents: read
+  contents: write      # 11-15 맥박 파일을 릴리스 첨부로 올리려고(hb=true 일 때만 쓴다)
 jobs:
   e2e:
     strategy:
@@ -85,6 +85,10 @@ jobs:
         if: ${{ inputs.hb == 'true' }}
         timeout-minutes: 150
         shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HB_TAG: ${{ inputs.tag }}
+          HB_NAME: hb-${{ matrix.os }}-${{ matrix.case }}-${{ github.run_id }}.txt
         run: |
           $ErrorActionPreference = "Continue"
           $c = '${{ matrix.case }}'.Split('-')
@@ -99,7 +103,10 @@ jobs:
             $net = 'x'; try { $tc = New-Object Net.Sockets.TcpClient; $ar = $tc.BeginConnect('github.com', 443, $null, $null); if ($ar.AsyncWaitHandle.WaitOne(4000) -and $tc.Connected) { $net = 'ok' }; $tc.Close() } catch { }
             $line = "hb {0}m mem={1}MB commit={7}MB disk={8}GB cpu={2}% step={3} net={4} procs={5} top={6}" -f [int]((Get-Date) - $t0).TotalMinutes, [int]($os.FreePhysicalMemory / 1024), [int]$cpu, $sid, $net, @(Get-Process).Count, $top, [int]($os.FreeVirtualMemory / 1024), [int]((Get-PSDrive C).Free / 1GB)
             # 서버가 끊기면 기록이 통째로 사라진다 — 주석(annotation)은 서버에 바로 남는다. 단계마다 종류별 10개 한도라 처음 10분은 매분(notice), 그 뒤는 3분마다(warning).
-            if ($i -le 10) { "::notice title=hb::$line" } elseif (($i % 3) -eq 0 -and $i -le 40) { "::warning title=hb::$line" } else { $line }
+            $line
+            # 서버가 끊기면 기록·주석이 통째로 사라진다 — 맥박 파일을 릴리스 첨부로 매분 덮어 올린다(밖에서 바로 읽힌다).
+            Add-Content -Encoding ascii $env:HB_NAME ((Get-Date).ToUniversalTime().ToString('HH:mm:ss') + ' ' + $line)
+            try { & gh release upload $env:HB_TAG $env:HB_NAME --clobber -R $env:GITHUB_REPOSITORY 2>&1 | Out-Null } catch { }
           }
           "rc=$($p.ExitCode)"; exit $p.ExitCode
       - name: windows security verdict
