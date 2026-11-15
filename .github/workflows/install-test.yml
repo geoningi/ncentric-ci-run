@@ -42,7 +42,10 @@ jobs:
         run: |
           gh release download "${{ inputs.tag }}" -R "${{ github.repository }}" -p bundle.tar.enc
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BUNDLE_KEY -in bundle.tar.enc | tar -x
-          rm -f bundle.tar.enc; mkdir -p out; test -d ci && test -d dl && echo unpacked
+          # 11-15: 같은 태그에 overlay.tar.enc 가 있으면 그 위에 덮어 푼다 — 시험 스크립트(ci/)만 고쳤을 때 설치 EXE 묶음(700MB)을 다시 올리지 않으려고.
+          rm -f bundle.tar.enc; mkdir -p out
+          if gh release download "${{ inputs.tag }}" -R "${{ github.repository }}" -p overlay.tar.enc 2>/dev/null; then openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BUNDLE_KEY -in overlay.tar.enc | tar -x; rm -f overlay.tar.enc; echo overlay; fi
+          test -d ci && test -d dl && echo unpacked
       - name: install and verify
         timeout-minutes: 90
         shell: powershell
@@ -107,7 +110,10 @@ jobs:
         run: |
           gh release download "${{ inputs.tag }}" -R "${{ github.repository }}" -p bundle.tar.enc
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BUNDLE_KEY -in bundle.tar.enc | tar -x
-          rm -f bundle.tar.enc; mkdir -p out; test -d ci && test -d dl && echo unpacked
+          # 11-15: 같은 태그에 overlay.tar.enc 가 있으면 그 위에 덮어 푼다 — 시험 스크립트(ci/)만 고쳤을 때 설치 EXE 묶음(700MB)을 다시 올리지 않으려고.
+          rm -f bundle.tar.enc; mkdir -p out
+          if gh release download "${{ inputs.tag }}" -R "${{ github.repository }}" -p overlay.tar.enc 2>/dev/null; then openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BUNDLE_KEY -in overlay.tar.enc | tar -x; rm -f overlay.tar.enc; echo overlay; fi
+          test -d ci && test -d dl && echo unpacked
       - name: defender real scan + install
         timeout-minutes: 40   # 평소 17~20분 — 11-12 13:25 windows-2022 에서 45분 넘게 멈춘 채 기록 없이 취소됨
         shell: powershell
