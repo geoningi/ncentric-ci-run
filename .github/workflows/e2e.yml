@@ -22,6 +22,9 @@ on:
       hb:
         description: heartbeat to the public log every minute (elapsed, memory, cpu, process names, step id only)
         default: 'false'
+      keepinfra:
+        description: with hb - put the runner agent folders back into the Defender exclusions (never the workspace or user folders)
+        default: 'false'
 permissions:
   contents: write      # 11-15 맥박 파일을 릴리스 첨부로 올리려고(hb=true 일 때만 쓴다)
 jobs:
@@ -94,7 +97,17 @@ jobs:
           $c = '${{ matrix.case }}'.Split('-')
           # 경우 이름이 idle 로 시작하면 대조: 제품·하네스를 전혀 돌리지 않고 10분 잠만 잔다(보안 켠 시험 서버만으로 멈추는지).
           #   출력은 종전 단계와 똑같이 자식 안에서 *> 로 받는다 — 밖에서 통째로 돌리면 하네스의 비밀 가림이 그 파일을 못 고쳐 rc=1(11-15).
-          $cmd = if ($c[1] -like 'idle*') { 'Start-Sleep 600' } else { "& ./ci/e2e/run.ps1 -Edition $($c[0]) -Variant $($c[1]) *> out/e2e_console.log; exit `$LASTEXITCODE" }
+          # 11-15 대조 2: 러너 관리 프로그램(provjobd·hosted-compute-agent·Runner.*)이 있는 폴더·서명 상태를 맥박 파일 첫 줄에 적는다.
+          #   경우 이름이 idlek 로 시작하면 그 폴더만 Defender 예외로 되돌린다(작업 폴더·사용자 폴더는 절대 넣지 않는다 — 제품 검사는 그대로).
+          $infra = @(Get-Process | Where-Object { $_.Name -match '^(provjobd|hosted-compute-agent|Runner\.Listener|Runner\.Worker)' })
+          $dirs = @($infra | ForEach-Object { try { Split-Path $_.Path -Parent } catch { } } | Where-Object { $_ } | Sort-Object -Unique)
+          $sig = ($infra | ForEach-Object { $s = '?'; try { $s = (Get-AuthenticodeSignature $_.Path).Status } catch { }; ($_.Name -replace '\d{6,}', '#') + '=' + $s } | Sort-Object -Unique) -join ','
+          $kept = @()
+          if ($c[1] -like 'idlek*' -or '${{ inputs.keepinfra }}' -eq 'true') {
+            foreach ($d in $dirs) { if ($d -notlike "$env:GITHUB_WORKSPACE*" -and $d -notlike 'C:\Users\*' -and $d.Length -gt 6) { Add-MpPreference -ExclusionPath $d -ErrorAction SilentlyContinue; $kept += $d } }
+          }
+          Add-Content -Encoding ascii $env:HB_NAME ("info dirs=[{0}] sig=[{1}] kept=[{2}]" -f ($dirs -join ';'), $sig, ($kept -join ';'))
+          $cmd = if ($c[1] -like 'idle*') { 'Start-Sleep 300' } else { "& ./ci/e2e/run.ps1 -Edition $($c[0]) -Variant $($c[1]) *> out/e2e_console.log; exit `$LASTEXITCODE" }
           $t0 = Get-Date
           function Beat {
             $os = Get-CimInstance Win32_OperatingSystem
@@ -105,7 +118,9 @@ jobs:
             # 러너 프로세스가 살아 있나(기계가 굳는 것인지 러너만 죽는 것인지) · Defender 기록의 마지막 사건 번호와 최근 1분 건수(번호만).
             $run = (@('Runner.Listener', 'Runner.Worker') | ForEach-Object { if (Get-Process $_ -ErrorAction SilentlyContinue) { '1' } else { '0' } }) -join ''
             $dv = '-'; try { $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Windows Defender/Operational'; StartTime = (Get-Date).AddSeconds(-60) } -MaxEvents 40 -ErrorAction Stop); $dv = "$($ev.Count):" + (($ev | Group-Object Id | Sort-Object Count -Descending | Select-Object -First 4 | ForEach-Object { "$($_.Name)x$($_.Count)" }) -join ',') } catch { $dv = '0' }
-            $line = "hb {0}s mem={1}MB commit={7}MB disk={8}GB cpu={2}% step={3} net={4} procs={5} runner={9} def={10} top={6}" -f [int]((Get-Date) - $t0).TotalSeconds, [int]($os.FreePhysicalMemory / 1024), [int]$cpu, $sid, $net, @(Get-Process).Count, $top, [int]($os.FreeVirtualMemory / 1024), [int]((Get-PSDrive C).Free / 1GB), $run, $dv
+            $run += '/' + @(Get-Process | Where-Object { $_.Name -match '^(provjobd|hosted-compute-agent)' }).Count
+            $thr = '-'; try { $td = @(Get-MpThreatDetection -ErrorAction Stop | Where-Object { "$($_.Resources)" -notmatch 'eicar' }); $thr = "$($td.Count)"; if ($td.Count) { $thr += ':' + ((@($td[-1].Resources)[0] -split '[\\/]')[-1] -replace '[^A-Za-z0-9_.-]', '?') } } catch { }
+            $line = "hb {0}s mem={1}MB commit={7}MB disk={8}GB cpu={2}% step={3} net={4} procs={5} runner={9} def={10} thr={11} top={6}" -f [int]((Get-Date) - $t0).TotalSeconds, [int]($os.FreePhysicalMemory / 1024), [int]$cpu, $sid, $net, @(Get-Process).Count, $top, [int]($os.FreeVirtualMemory / 1024), [int]((Get-PSDrive C).Free / 1GB), $run, $dv, $thr
             $line
             # 서버가 끊기면 기록·주석이 통째로 사라진다 — 맥박 파일을 릴리스 첨부로 덮어 올린다(밖에서 바로 읽힌다).
             Add-Content -Encoding ascii $env:HB_NAME ((Get-Date).ToUniversalTime().ToString('HH:mm:ss') + ' ' + $line)
@@ -113,8 +128,8 @@ jobs:
           }
           Beat      # 자식을 띄우기 전에 한 번 — 이 줄조차 없으면 단계 시작 전에 굳은 것
           $p = Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd -PassThru -NoNewWindow; $null = $p.Handle
-          # 처음 4분은 20초마다(11-15 맥박 실행에서 멈춘 작업은 첫 1분 안에 굳었다), 그 뒤는 1분마다. 토큰 호출 한도(시간당 1000) 때문에 더 촘촘히는 안 한다.
-          while (-not $p.HasExited) { Start-Sleep -Seconds $(if (((Get-Date) - $t0).TotalSeconds -lt 240) { 20 } else { 60 }); Beat }
+          # 처음 96초는 8초마다(11-15 대조 실행에서 굳은 작업은 첫 맥박 뒤 20초 안에 끊겼다), 4분까지 20초마다, 그 뒤는 1분마다. 토큰 호출 한도(시간당 1000) 때문에 더 촘촘히는 안 한다.
+          while (-not $p.HasExited) { $el = ((Get-Date) - $t0).TotalSeconds; Start-Sleep -Seconds $(if ($el -lt 96) { 8 } elseif ($el -lt 240) { 20 } else { 60 }); Beat }
           "rc=$($p.ExitCode)"; exit $p.ExitCode
       - name: windows security verdict
         if: ${{ always() && inputs.winsec == 'true' }}
