@@ -92,22 +92,29 @@ jobs:
         run: |
           $ErrorActionPreference = "Continue"
           $c = '${{ matrix.case }}'.Split('-')
-          $p = Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', './ci/e2e/run.ps1', '-Edition', $c[0], '-Variant', $c[1] -RedirectStandardOutput out/e2e_console.log -RedirectStandardError out/e2e_console_err.log -PassThru -NoNewWindow; $null = $p.Handle
-          $t0 = Get-Date; $i = 0
-          while (-not $p.HasExited) {
-            Start-Sleep -Seconds 60; $i++
+          # 경우 이름이 idle 로 시작하면 대조: 제품·하네스를 전혀 돌리지 않고 10분 잠만 잔다(보안 켠 시험 서버만으로 멈추는지).
+          #   출력은 종전 단계와 똑같이 자식 안에서 *> 로 받는다 — 밖에서 통째로 돌리면 하네스의 비밀 가림이 그 파일을 못 고쳐 rc=1(11-15).
+          $cmd = if ($c[1] -like 'idle*') { 'Start-Sleep 600' } else { "& ./ci/e2e/run.ps1 -Edition $($c[0]) -Variant $($c[1]) *> out/e2e_console.log; exit `$LASTEXITCODE" }
+          $t0 = Get-Date
+          function Beat {
             $os = Get-CimInstance Win32_OperatingSystem
             $cpu = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average
             $top = (Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 | ForEach-Object { ($_.Name -replace '[^A-Za-z0-9_.-]', '?') + ':' + [int]$_.CPU }) -join ' '
             $sid = '-'; try { $m = [regex]::Matches((Get-Content out/steps.log -Tail 40 -ErrorAction Stop | Out-String), '\b[SU]\d{1,3}\b'); if ($m.Count) { $sid = $m[$m.Count - 1].Value } } catch { }
             $net = 'x'; try { $tc = New-Object Net.Sockets.TcpClient; $ar = $tc.BeginConnect('github.com', 443, $null, $null); if ($ar.AsyncWaitHandle.WaitOne(4000) -and $tc.Connected) { $net = 'ok' }; $tc.Close() } catch { }
-            $line = "hb {0}m mem={1}MB commit={7}MB disk={8}GB cpu={2}% step={3} net={4} procs={5} top={6}" -f [int]((Get-Date) - $t0).TotalMinutes, [int]($os.FreePhysicalMemory / 1024), [int]$cpu, $sid, $net, @(Get-Process).Count, $top, [int]($os.FreeVirtualMemory / 1024), [int]((Get-PSDrive C).Free / 1GB)
-            # 서버가 끊기면 기록이 통째로 사라진다 — 주석(annotation)은 서버에 바로 남는다. 단계마다 종류별 10개 한도라 처음 10분은 매분(notice), 그 뒤는 3분마다(warning).
+            # 러너 프로세스가 살아 있나(기계가 굳는 것인지 러너만 죽는 것인지) · Defender 기록의 마지막 사건 번호와 최근 1분 건수(번호만).
+            $run = (@('Runner.Listener', 'Runner.Worker') | ForEach-Object { if (Get-Process $_ -ErrorAction SilentlyContinue) { '1' } else { '0' } }) -join ''
+            $dv = '-'; try { $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Windows Defender/Operational'; StartTime = (Get-Date).AddSeconds(-60) } -MaxEvents 40 -ErrorAction Stop); $dv = "$($ev.Count):" + (($ev | Group-Object Id | Sort-Object Count -Descending | Select-Object -First 4 | ForEach-Object { "$($_.Name)x$($_.Count)" }) -join ',') } catch { $dv = '0' }
+            $line = "hb {0}s mem={1}MB commit={7}MB disk={8}GB cpu={2}% step={3} net={4} procs={5} runner={9} def={10} top={6}" -f [int]((Get-Date) - $t0).TotalSeconds, [int]($os.FreePhysicalMemory / 1024), [int]$cpu, $sid, $net, @(Get-Process).Count, $top, [int]($os.FreeVirtualMemory / 1024), [int]((Get-PSDrive C).Free / 1GB), $run, $dv
             $line
-            # 서버가 끊기면 기록·주석이 통째로 사라진다 — 맥박 파일을 릴리스 첨부로 매분 덮어 올린다(밖에서 바로 읽힌다).
+            # 서버가 끊기면 기록·주석이 통째로 사라진다 — 맥박 파일을 릴리스 첨부로 덮어 올린다(밖에서 바로 읽힌다).
             Add-Content -Encoding ascii $env:HB_NAME ((Get-Date).ToUniversalTime().ToString('HH:mm:ss') + ' ' + $line)
             try { & gh release upload $env:HB_TAG $env:HB_NAME --clobber -R $env:GITHUB_REPOSITORY 2>&1 | Out-Null } catch { }
           }
+          Beat      # 자식을 띄우기 전에 한 번 — 이 줄조차 없으면 단계 시작 전에 굳은 것
+          $p = Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd -PassThru -NoNewWindow; $null = $p.Handle
+          # 처음 4분은 20초마다(11-15 맥박 실행에서 멈춘 작업은 첫 1분 안에 굳었다), 그 뒤는 1분마다. 토큰 호출 한도(시간당 1000) 때문에 더 촘촘히는 안 한다.
+          while (-not $p.HasExited) { Start-Sleep -Seconds $(if (((Get-Date) - $t0).TotalSeconds -lt 240) { 20 } else { 60 }); Beat }
           "rc=$($p.ExitCode)"; exit $p.ExitCode
       - name: windows security verdict
         if: ${{ always() && inputs.winsec == 'true' }}
